@@ -20,6 +20,7 @@ from typing import Any
 
 import torch
 
+from hyper_parallel.core.multicore import shmem
 from hyper_parallel.core.multicore.torch import ops as multicore_ops
 
 from .plan import MegaMoePlan
@@ -168,7 +169,10 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
                 routed_tokens,
                 dispatch,
             )
-            workspace.symmetric_memory.barrier()
+            # Temporary: the stream-enqueue device barrier (shmem.barrier(blocking=False)) causes a deterministic
+            # aicore exception (507015, identical PC on all ranks) on CANN 9.2.0 CI. Root cause is pending;
+            # a Host-synchronous HCCL barrier restores correctness at the cost of per-iteration Host sync points.
+            shmem.host_barrier()
             multicore_ops.mega_moe(
                 dispatch,
                 metadata.dispatch_target_off * spec.hidden_size,
@@ -274,7 +278,8 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
                 weight1,
                 weight2,
             )
-            workspace.symmetric_memory.barrier()
+            # Temporary: see the matching comment before the forward mega_moe launch.
+            shmem.host_barrier()
             multicore_ops.mega_moe_grad(
                 dispatch,
                 dispatch_target_off * spec.hidden_size,

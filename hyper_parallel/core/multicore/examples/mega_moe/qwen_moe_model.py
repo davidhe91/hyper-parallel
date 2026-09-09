@@ -31,16 +31,86 @@ import torch  # pylint: disable=forbidden-backend-import
 import torch.nn.functional as F  # pylint: disable=forbidden-backend-import
 from torch import nn  # pylint: disable=forbidden-backend-import
 
-from hyper_parallel.auto_models.components.models.qwen3_moe_attention_common import (
+from hyper_parallel.models.qwen3_moe.adapter.attention import (
     run_qwen3_moe_flash_attention,
 )
 from hyper_parallel.core.multicore import MegaMoeExperts
-from hyper_parallel.models.modules import (
-    RMSNorm,
-    RotaryEmbedding,
-    SwiGLUMLP,
-    apply_rotary_pos_emb,
-)
+
+class RotaryEmbedding(nn.Module):
+    """Rotary position embedding (Transformers-compatible, eager)."""
+
+    def __init__(self, dim: int, max_seq_len: int = 4096, theta: float = 10000.0):
+        super().__init__()
+        self.dim = dim
+        self.theta = theta
+        self.max_seq_len = max_seq_len
+        inv_freq = 1.0 / (
+            self.theta ** (torch.arange(0, self.dim, 2, dtype=torch.float32) / self.dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @torch.no_grad()
+    def forward(self, position_ids: torch.Tensor):
+        """Return ``(cos, sin)`` for the requested positions."""
+        if position_ids.ndim == 3:
+            position_ids = position_ids[0]
+        flat = position_ids.float().reshape(-1)
+        freqs = torch.outer(flat, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.cos(), emb.sin()
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    first = x[..., : x.shape[-1] // 2]
+    second = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-second, first), dim=-1)
+
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply rotary position embedding to query and key tensors."""
+    if cos.ndim == 2:
+        cos = cos.unsqueeze(0).unsqueeze(0).to(q.dtype)
+        sin = sin.unsqueeze(0).unsqueeze(0).to(k.dtype)
+    elif cos.ndim == 3:
+        cos = cos.unsqueeze(1).to(q.dtype)
+        sin = sin.unsqueeze(1).to(k.dtype)
+    q_embed = (q * cos) + (_rotate_half(q) * sin)
+    k_embed = (k * cos) + (_rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+class RMSNorm(nn.Module):
+    """Root mean square layer normalization (eager fp32 path)."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return self.weight * hidden_states.to(input_dtype)
+
+
+class SwiGLUMLP(nn.Module):
+    """SwiGLU MLP with standard ``gate_proj`` / ``up_proj`` / ``down_proj``."""
+
+    def __init__(self, hidden_size: int, intermediate_size: int, bias: bool = False):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
 @dataclass(frozen=True)
@@ -184,7 +254,7 @@ class QwenAttention(nn.Module):
             )
             .transpose(1, 2)
         )
-        cos, sin = self.rotary_emb(hidden_states, position_ids)
+        cos, sin = self.rotary_emb(position_ids)
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
         output, _ = run_qwen3_moe_flash_attention(
             self,
