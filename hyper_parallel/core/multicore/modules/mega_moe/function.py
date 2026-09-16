@@ -361,21 +361,10 @@ class _MegaMoeFunction(torch.autograd.Function):  # pylint: disable=abstract-met
         workspace = ctx.workspace
         spec = plan.spec
         saved_tensors = ctx.saved_tensors
-        (
-            saved_dispatch,
-            up_proj,
-            activation,
-            weight1,
-            weight2,
-            group_list,
-            dispatch_src_off,
-            dispatch_target_off,
-            dispatch_size,
-            combine_src_off,
-            combine_target_off,
-            combine_size,
-            *permutation_inputs,
-        ) = saved_tensors
+        saved_dispatch = saved_tensors[0]
+        weight1 = saved_tensors[3]
+        weight2 = saved_tensors[4]
+        permutation_inputs = saved_tensors[12:]
         kernel_saved_tensors = saved_tensors[:12]
         workspace.claim()
         profile_call = None
