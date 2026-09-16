@@ -22,6 +22,7 @@ Combines:
 import ctypes
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Any
 
 # ── Constants (match runtime_head.hpp exactly) ────────────────────────────────
 MAX_TENSOR_DIMS      = 4
@@ -35,6 +36,9 @@ MAX_GROUP_LIST       = 512
 MAX_EXPERT_NUM_PER_RANK = 16
 ATOMIC_ADD_VALUE_LEN = 8
 READY_CACHE_LINE_BYTES = 64
+INVALID_PROFILE_DESC_ID  = 0xFFFFFFFF
+INVALID_PROFILE_OWNER_ID = 0xFFFFFFFF
+EVENT_INVALID_ID         = 0xFFFFFFFF
 
 
 def mega_moe_event_capacity(num_experts: int, ep_size: int) -> int:
@@ -57,6 +61,8 @@ def mega_moe_event_capacity(num_experts: int, ep_size: int) -> int:
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
 class TaskAiCoreType(IntEnum):
+    """Worker core categories encoded in RuntimeConfig."""
+
     TASK_AICORE_INVALID = 0
     TASK_AICORE_CUBE    = 1
     TASK_AICORE_VECTOR  = 2
@@ -64,6 +70,8 @@ class TaskAiCoreType(IntEnum):
 
 
 class TaskType(IntEnum):
+    """Task operation kinds understood by the Device scheduler."""
+
     TASK_TERMINATE            = 0
     TASK_BEGIN_TASK_GRAPH     = 10
     TASK_ADD_CUSTOM           = 101
@@ -75,6 +83,8 @@ class TaskType(IntEnum):
 
 
 class EventType(IntEnum):
+    """Dependency and trigger event operations used by scheduled tasks."""
+
     EVENT_EMPTY                  = 900
     EVENT_LAUNCH_TASKS           = 901
     EVENT_LAUNCH_MASSIVE_TASKS   = 902
@@ -85,6 +95,8 @@ class EventType(IntEnum):
 
 
 class DynamicType(IntEnum):
+    """Runtime dynamic-data operations applied before task execution."""
+
     DYNAMIC_EMPTY        = 0
     DYNAMIC_DSV3_MOE = 101
 
@@ -92,6 +104,8 @@ class DynamicType(IntEnum):
 # ── ctypes Structures (mirror runtime_head.hpp) ───────────────────────────────
 
 class TensorDescC(ctypes.Structure):
+    """Serialized tensor address and shape descriptor."""
+
     _fields_ = [
         ("tensor_type",     ctypes.c_uint32),
         ("num_dims",        ctypes.c_uint32),
@@ -107,6 +121,7 @@ class TensorDescC(ctypes.Structure):
 
 
 class TaskDescC(ctypes.Structure):
+    """Serialized task descriptor shared by Host and Device schedulers."""
     _fields_ = [
         ("task_type",            ctypes.c_uint32),
         ("task_aicore_type",     ctypes.c_uint32),
@@ -124,12 +139,24 @@ class TaskDescC(ctypes.Structure):
         ("extra_value_0",        ctypes.c_uint32),
         ("extra_value_1",        ctypes.c_uint32),
         ("extra_value_2",        ctypes.c_uint32),
-        ("extra_value_3",        ctypes.c_uint32),
-        ("extra_value_4",        ctypes.c_uint32),
+        ("profile_desc_id",      ctypes.c_uint32),
+        ("profile_owner_id",     ctypes.c_uint32),
     ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize optional profiling metadata to explicit invalid sentinels."""
+        has_profile_desc = len(args) >= len(self._fields_) - 1 or "profile_desc_id" in kwargs
+        has_profile_owner = len(args) >= len(self._fields_) or "profile_owner_id" in kwargs
+        super().__init__(*args, **kwargs)
+        if not has_profile_desc:
+            self.profile_desc_id = INVALID_PROFILE_DESC_ID
+        if not has_profile_owner:
+            self.profile_owner_id = INVALID_PROFILE_OWNER_ID
 
 
 class EventDescC(ctypes.Structure):
+    """Serialized event operation descriptor."""
+
     _fields_ = [
         ("event_type",    ctypes.c_uint32),
         ("num_triggers",  ctypes.c_uint32),
@@ -139,6 +166,8 @@ class EventDescC(ctypes.Structure):
 
 
 class DynamicDataC(ctypes.Structure):
+    """Serialized dynamic-data update descriptor."""
+
     _fields_ = [
         ("dynamic_type",           ctypes.c_uint32),
         ("dynamic_input_position", ctypes.c_uint32),
@@ -156,7 +185,10 @@ class RuntimeConfigC(ctypes.Structure):
         ("task_capacity", ctypes.c_uint32),
         ("event_capacity", ctypes.c_uint32),
         ("ready_event", ctypes.c_uint32),
-        ("_padding", ctypes.c_uint32 * 11),
+        ("cycle_profiling_enabled", ctypes.c_uint32),
+        ("aic_profile_record_capacity", ctypes.c_uint32),
+        ("aiv_profile_record_capacity", ctypes.c_uint32),
+        ("_padding", ctypes.c_uint32 * 8),
     ]
 
 
@@ -175,6 +207,8 @@ class TilingDataC(ctypes.Structure):
 
 
 class SwiGluTilingDataC(ctypes.Structure):
+    """Serialized SwiGLU tiling values for one worker."""
+
     _fields_ = [
         ("is32BAligned",         ctypes.c_uint32),
         ("isDoubleBuffer",       ctypes.c_uint32),

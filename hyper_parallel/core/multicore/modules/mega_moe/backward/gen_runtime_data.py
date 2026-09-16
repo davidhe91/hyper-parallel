@@ -45,6 +45,9 @@ from hyper_parallel.core.multicore.modules.mega_moe.backward.tiling_tables impor
     get_w1_grad_tiling_bytes,
     get_w2_grad_tiling_bytes,
 )
+from hyper_parallel.core.multicore.modules.mega_moe.profiling import (
+    _configure_mega_moe_profile_metadata,
+)
 from hyper_parallel.core.multicore.scheduler.builder import allocate_graph_config
 from hyper_parallel.core.multicore.scheduler.config import (
     RuntimeConfigC,
@@ -119,6 +122,13 @@ def build_config_for_rank(graph: ComputeGraph, tsv: TaskSplitValue, rank_id: int
     cfg.atomic_add_values[0] = 1
     configure_ready_handshake(cfg, tsv)
     validate_runtime_config(cfg, tsv, num_cube_cores)
+    _configure_mega_moe_profile_metadata(
+        cfg,
+        graph,
+        tsv,
+        num_cube_cores=num_cube_cores,
+        is_backward=True,
+    )
     return cfg
 
 

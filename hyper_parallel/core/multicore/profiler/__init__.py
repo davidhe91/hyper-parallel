@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-"""Torch-only Multicore APIs, separate from the HyperParallel root exports."""
+"""Public MegaKernel profiling APIs."""
 
-from hyper_parallel.core.multicore import profiler
-from hyper_parallel.core.multicore.modules.mega_moe.module import MegaMoeExperts
+from hyper_parallel.core.multicore.profiler.profiler import (
+    ProfilerAction,
+    mega_kernel_profile,
+    merge_chrome_traces,
+    schedule,
+)
 
-__all__ = ["MegaMoeExperts", "profiler"]
+__all__ = ["ProfilerAction", "mega_kernel_profile", "merge_chrome_traces", "schedule"]

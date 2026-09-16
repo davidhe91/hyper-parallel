@@ -274,7 +274,7 @@ class TestRuntimeCppReader(unittest.TestCase):
         cfg = allocate_runtime_config(17)
         cfg.task_num = 17
         data = bytearray(serialize_runtime_config(cfg))
-        data[20:RUNTIME_HEADER_BYTES] = bytes([255]) * (RUNTIME_HEADER_BYTES - 20)
+        data[32:RUNTIME_HEADER_BYTES] = bytes([255]) * (RUNTIME_HEADER_BYTES - 32)
         self.assertTrue(self.reader.valid_runtime(ctypes.create_string_buffer(bytes(data)), len(data), 4096))
 
     def test_ready_header_and_persistent_storage_bounds(self) -> None:

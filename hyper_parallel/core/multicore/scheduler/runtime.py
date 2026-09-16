@@ -143,7 +143,17 @@ def serialize_runtime_config(cfg: RuntimeConfigC) -> bytes:
     expected = runtime_config_serialized_size(capacity, event_capacity)
     layout = type(cfg)
     address = ctypes.addressof(cfg)
-    prefix = struct.pack("<5I44x", cfg.task_num, cfg.num_workers, capacity, event_capacity, cfg.ready_event)
+    prefix = struct.pack(
+        "<8I32x",
+        cfg.task_num,
+        cfg.num_workers,
+        capacity,
+        event_capacity,
+        cfg.ready_event,
+        cfg.cycle_profiling_enabled,
+        cfg.aic_profile_record_capacity,
+        cfg.aiv_profile_record_capacity,
+    )
     sections = [
         (layout.all_event_num_triggers.offset, event_capacity * 4),
         (layout.all_tasks.offset, capacity * TASK_DESC_SIZE),

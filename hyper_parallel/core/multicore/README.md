@@ -7,6 +7,8 @@ SHMEM 由 Multicore 在内部管理，不提供独立用户接口。
 
 - [构建与交付](docs/build.md)
 - [架构设计与扩展](docs/architecture.md)
+- [MegaKernel Profiling 使用指南](../../../docs/guide/mega_kernel_profiling.md)
+- [MegaKernel Profiling 设计与实现](docs/mega_kernel_profiling_design_and_usage.md)
 - [私有 SHMEM 生命周期](docs/shmem.md)
 - [完整 MegaMoE 样例](examples/mega_moe/README.md)
 
@@ -125,7 +127,8 @@ MegaMHC、MegaDSA等Multicore特性复用同一SHMEM Runtime时，也通过同�
 重新开启生命周期时，所有 rank 完成关闭后使用新的 `HYPER_PARALLEL_SHMEM_BOOTSTRAP_ENDPOINT`，
 `HYPER_PARALLEL_SHMEM_HEAP_SIZE` 等堆配置在下一生命周期首次获取引用时重新生效。
 
-完整 Qwen 接入及启动方式见 [MegaMoe 示例](examples/mega_moe/README.md)。
+完整 Qwen 接入及启动方式见 [MegaMoe 示例](examples/mega_moe/README.md)。MegaKernel 内部阶段采集方式见
+[MegaKernel Profiling 使用指南](../../../docs/guide/mega_kernel_profiling.md)。
 
 ---
 

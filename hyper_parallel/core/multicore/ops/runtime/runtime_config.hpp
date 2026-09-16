@@ -39,6 +39,7 @@ constexpr uint32_t INT32_T_SIZE = sizeof(int32_t);
 constexpr uint32_t INT64_T_SIZE = sizeof(int64_t);
 
 constexpr uint32_t EVENT_INVALID_ID = 0xFFFFFFFF;
+constexpr uint32_t PROFILE_DESC_INVALID_ID = 0xFFFFFFFF;
 
 typedef uint32_t TaskId;
 
@@ -118,8 +119,8 @@ struct TaskDesc {
   uint32_t extra_value_0;
   uint32_t extra_value_1;
   uint32_t extra_value_2;
-  uint32_t extra_value_3;
-  uint32_t extra_value_4;
+  uint32_t profile_desc_id;
+  uint32_t profile_owner_id;
 };
 
 struct ReadyHandshakeMeta {
@@ -132,7 +133,10 @@ struct RuntimeHeader {
   uint32_t task_capacity;
   uint32_t event_capacity;
   uint32_t ready_event;
-  uint32_t padding[11];
+  uint32_t cycle_profiling_enabled;
+  uint32_t aic_profile_record_capacity;
+  uint32_t aiv_profile_record_capacity;
+  uint32_t padding[8];
 };
 
 static_assert(sizeof(RuntimeHeader) == 64);
@@ -250,9 +254,25 @@ __aicore__ inline void getTaskDesc(__gm__ uint8_t *tiling, TaskDesc *tilingData,
   start_size += UINT32_T_SIZE;
   tilingData->extra_value_2 = (*(__gm__ uint32_t *)(tiling + start_size));
   start_size += UINT32_T_SIZE;
-  tilingData->extra_value_3 = (*(__gm__ uint32_t *)(tiling + start_size));
+  tilingData->profile_desc_id = (*(__gm__ uint32_t *)(tiling + start_size));
   start_size += UINT32_T_SIZE;
-  tilingData->extra_value_4 = (*(__gm__ uint32_t *)(tiling + start_size));
+  tilingData->profile_owner_id = (*(__gm__ uint32_t *)(tiling + start_size));
+}
+
+__aicore__ inline uint32_t getTaskProfileDescId(__gm__ uint8_t *tiling, uint32_t index_size) {
+  uint32_t tensor_desc_size = UINT32_T_SIZE * 8 + UINT32_T_SIZE * MAX_TENSOR_DIMS * 2;
+  uint32_t task_desc_size = UINT32_T_SIZE * 6 + MAX_INPUTS_PER_TASK * tensor_desc_size +
+                            MAX_OUTPUTS_PER_TASK * tensor_desc_size + UINT32_T_SIZE * 10;
+  uint32_t size = getAllTasksOffset(tiling) + (index_size + 1) * task_desc_size - UINT32_T_SIZE * 2;
+  return (*(__gm__ uint32_t *)(tiling + size));
+}
+
+__aicore__ inline uint32_t getTaskProfileOwnerId(__gm__ uint8_t *tiling, uint32_t index_size) {
+  uint32_t tensor_desc_size = UINT32_T_SIZE * 8 + UINT32_T_SIZE * MAX_TENSOR_DIMS * 2;
+  uint32_t task_desc_size = UINT32_T_SIZE * 6 + MAX_INPUTS_PER_TASK * tensor_desc_size +
+                            MAX_OUTPUTS_PER_TASK * tensor_desc_size + UINT32_T_SIZE * 10;
+  uint32_t size = getAllTasksOffset(tiling) + (index_size + 1) * task_desc_size - UINT32_T_SIZE;
+  return (*(__gm__ uint32_t *)(tiling + size));
 }
 
 __aicore__ inline void getEventDesc(__gm__ uint8_t *tiling, EventDesc *tilingData, uint32_t index_size) {
@@ -316,6 +336,18 @@ __aicore__ inline uint32_t getGroupedMatmulGroupListOffsetById(__gm__ uint8_t *t
 
 __aicore__ inline uint32_t getAtomicAddValuesOffset(__gm__ uint8_t *tiling) {
   return getGroupedMatmulGroupListOffset(tiling) + MAX_GROUP_LIST * INT64_T_SIZE;
+}
+
+__aicore__ inline bool isCycleProfileEnabled(__gm__ uint8_t *tiling) {
+  return (*(__gm__ uint32_t *)(tiling + 5 * UINT32_T_SIZE)) != 0;
+}
+
+__aicore__ inline uint32_t getAicProfileRecordCapacity(__gm__ uint8_t *tiling) {
+  return (*(__gm__ uint32_t *)(tiling + 6 * UINT32_T_SIZE));
+}
+
+__aicore__ inline uint32_t getAivProfileRecordCapacity(__gm__ uint8_t *tiling) {
+  return (*(__gm__ uint32_t *)(tiling + 7 * UINT32_T_SIZE));
 }
 
 __aicore__ inline int64_t getExtraValueFromTiling(__gm__ uint8_t *tiling, uint32_t index) {
