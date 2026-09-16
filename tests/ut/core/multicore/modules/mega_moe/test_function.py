@@ -47,8 +47,9 @@ class TestMegaMoeFunction(unittest.TestCase):
         for name in ("up_proj", "swiglu", "down_proj", "act_grad", "gate_grad",
                      "w1_grad", "w2_grad", "swiglu_grad"):
             setattr(plan, f"{name}_tiling", None)
-        plan.fwd_runtime_config = None
-        plan.bwd_runtime_config = None
+        runtime = SimpleNamespace(normal_tensor=None)
+        plan.fwd_runtime = runtime
+        plan.bwd_runtime = runtime
         workspace = Mock(
             expert_capacity=128,
             expert_buffer=torch.empty(128, 4),
@@ -117,8 +118,16 @@ class TestMegaMoeFunction(unittest.TestCase):
         outputs = []
         sources = []
         with (
-            patch.object(function_module.multicore_ops, "mega_moe", side_effect=forward_kernel),
-            patch.object(function_module.multicore_ops, "mega_moe_grad", side_effect=backward_kernel),
+            patch.object(
+                function_module.multicore_ops,
+                "mega_moe_with_profile_buffer",
+                side_effect=forward_kernel,
+            ),
+            patch.object(
+                function_module.multicore_ops,
+                "mega_moe_grad_with_profile_buffer",
+                side_effect=backward_kernel,
+            ),
             patch.object(function_module.torch_npu, "npu_moe_token_permute_grad_v2",
                          side_effect=permutation_gradient) as mock_permutation,
         ):
