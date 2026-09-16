@@ -19,14 +19,13 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch_npu
 
-from hyper_parallel.core.multicore import shmem
 from hyper_parallel.core.multicore.torch import ops as multicore_ops
 
 from .plan import MegaMoePlan
-from .route import RouteMetadata
+from .route import PreparedTopKRoute, RouteMetadata
 from .workspace import MegaMoeWorkspace
-
 
 
 def _workspace_tensor(tensor: Any | None, name: str) -> Any:
@@ -42,18 +41,19 @@ def _allocate_forward_intermediates(
     routed_tokens: Any,
     dispatch: Any,
 ) -> tuple[Any, Any, Any]:
-    """Allocate forward tensors outside the autograd bridge."""
-    up_proj = torch.zeros(
+    """Allocate outputs whose received rows are overwritten before use."""
+    # GMM and SwiGLU cover the received prefix; an empty rank reads no rows.
+    up_proj = torch.empty(
         (capacity, spec.intermediate_size * 2),
         dtype=routed_tokens.dtype,
         device=routed_tokens.device,
     )
-    activation = torch.zeros(
+    activation = torch.empty(
         (capacity, spec.intermediate_size),
         dtype=routed_tokens.dtype,
         device=routed_tokens.device,
     )
-    return up_proj, activation, torch.zeros_like(dispatch)
+    return up_proj, activation, torch.empty_like(dispatch[:capacity])
 
 
 def _allocate_backward_intermediates(
@@ -63,19 +63,19 @@ def _allocate_backward_intermediates(
     weight1: Any,
     weight2: Any,
 ) -> tuple[Any, Any, Any, Any, Any]:
-    """Allocate zero-safe backward tensors outside the autograd bridge."""
+    """Allocate overwritten activations and zero-safe expert gradients."""
     grad_weight2 = torch.zeros_like(weight2)
-    act_grad = torch.zeros(
+    act_grad = torch.empty(
         (capacity, spec.intermediate_size),
         dtype=grad_output.dtype,
         device=grad_output.device,
     )
-    swiglu_grad = torch.zeros(
+    swiglu_grad = torch.empty(
         (capacity, spec.intermediate_size * 2),
         dtype=grad_output.dtype,
         device=grad_output.device,
     )
-    gate_dx = torch.zeros(
+    gate_dx = torch.empty(
         (capacity, spec.hidden_size),
         dtype=grad_output.dtype,
         device=grad_output.device,
@@ -85,22 +85,38 @@ def _allocate_backward_intermediates(
     return grad_weight1, grad_weight2, act_grad, swiglu_grad, gate_dx
 
 
+def _restore_input_gradient(ctx: Any, grad_x: Any, permutation_inputs: tuple[Any, ...]) -> Any:
+    """Return an owned input gradient while the workspace lease is held."""
+    if not ctx.needs_input_grad[0]:
+        return None
+    if not ctx.has_permutation:
+        return grad_x.clone()
+    (unpermute_mapping,) = permutation_inputs
+    spec = ctx.plan.spec
+    # Consume the shared gradient before release records completion.
+    # The permutation gradient owns its reduced [T, H] output.
+    return torch_npu.npu_moe_token_permute_grad_v2(
+        grad_x, unpermute_mapping, spec.local_num_tokens, grad_x.dtype, spec.top_k
+    )
+
+
 def _save_forward_state(
     ctx: Any,
     plan: MegaMoePlan,
     workspace: MegaMoeWorkspace,
-    dispatch: Any,
+    saved_dispatch: Any,
     up_proj: Any,
     activation: Any,
     weight1: Any,
     weight2: Any,
     metadata: RouteMetadata,
+    permutation_inputs: tuple[Any, ...] = (),
 ) -> None:
     """Save owned forward tensors and route state for backward."""
     ctx.plan = plan
     ctx.workspace = workspace
     ctx.save_for_backward(
-        dispatch.clone(),
+        saved_dispatch,
         up_proj,
         activation,
         weight1,
@@ -112,6 +128,7 @@ def _save_forward_state(
         metadata.combine_src_off,
         metadata.combine_target_off,
         metadata.combine_size,
+        *permutation_inputs,
     )
 
 
@@ -130,6 +147,7 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
         route: RouteMetadata,
         plan: MegaMoePlan,
         workspace: MegaMoeWorkspace,
+        permutation: tuple[Any, Any, Any] | None,
     ) -> Any:
         """Launch the legacy forward op and save owned backward inputs.
 
@@ -141,38 +159,37 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
             route: Route offsets, sizes and group metadata.
             plan: Shape-specific forward and backward descriptors.
             workspace: Reusable directional execution buffers.
+            permutation: Optional routed rows, expert IDs and inverse mapping
+                when the first tensor argument contains original token rows.
 
         Returns:
             Owned expert-major output rows.
         """
         spec = plan.spec
         metadata = route
+        permutation_inputs = ()
+        if permutation is not None:
+            routed_tokens, _, unpermute_mapping = permutation
+            if ctx.needs_input_grad[0]:
+                permutation_inputs = (unpermute_mapping,)
+        ctx.has_permutation = permutation is not None
         workspace.ensure(spec, routed_tokens.dtype, routed_tokens.device)
         workspace.claim()
         try:
             dispatch = _workspace_tensor(workspace.expert_buffer, "expert_buffer")
             combine = _workspace_tensor(workspace.routed_buffer, "routed_buffer")
-            events = _workspace_tensor(
-                workspace.forward_event_counters,
-                "forward_event_counters",
-            )
             gmm_workspace = _workspace_tensor(
                 workspace.gmm_workspace, "gmm_workspace"
             )
-            dispatch.zero_()
-            combine.zero_()
-            events.zero_()
-            capacity = workspace.expert_capacity
+            # Dispatch and combine overwrite disjoint route ranges before consumers run.
+            capacity = metadata.expert_capacity
             up_proj, activation, down_proj = _allocate_forward_intermediates(
                 spec,
                 capacity,
                 routed_tokens,
                 dispatch,
             )
-            # Temporary: the stream-enqueue device barrier (shmem.barrier(blocking=False)) causes a deterministic
-            # aicore exception (507015, identical PC on all ranks) on CANN 9.2.0 CI. Root cause is pending;
-            # a Host-synchronous HCCL barrier restores correctness at the cost of per-iteration Host sync points.
-            shmem.host_barrier()
+            events = workspace.prepare_event_counters(forward=True)
             multicore_ops.mega_moe(
                 dispatch,
                 metadata.dispatch_target_off * spec.hidden_size,
@@ -203,16 +220,20 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
                 spec.local_num_tokens,
             )
             output = combine.clone()
+            # Combine has consumed down_proj on this stream. Retain its owned
+            # storage for backward before the next call reuses SHMEM dispatch.
+            down_proj.copy_(dispatch[:capacity])
             _save_forward_state(
                 ctx,
                 plan,
                 workspace,
-                dispatch,
+                down_proj,
                 up_proj,
                 activation,
                 weight1,
                 weight2,
                 metadata,
+                permutation_inputs,
             )
             return output
         finally:
@@ -245,15 +266,12 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
             combine_src_off,
             combine_target_off,
             combine_size,
+            *permutation_inputs,
         ) = ctx.saved_tensors
         workspace.claim()
         try:
             dispatch = _workspace_tensor(workspace.expert_buffer, "expert_buffer")
             grad_x = _workspace_tensor(workspace.routed_buffer, "routed_buffer")
-            events = _workspace_tensor(
-                workspace.backward_event_counters,
-                "backward_event_counters",
-            )
             gmm_workspace = _workspace_tensor(
                 workspace.gmm_workspace, "gmm_workspace"
             )
@@ -261,10 +279,7 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
                 workspace.swiglu_grad_workspace,
                 "swiglu_grad_workspace",
             )
-            dispatch.zero_()
-            grad_x.zero_()
-            events.zero_()
-            capacity = workspace.expert_capacity
+            capacity = saved_dispatch.shape[0]
             (
                 grad_weight1,
                 grad_weight2,
@@ -278,8 +293,7 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
                 weight1,
                 weight2,
             )
-            # Temporary: see the matching comment before the forward mega_moe launch.
-            shmem.host_barrier()
+            events = workspace.prepare_event_counters(forward=False)
             multicore_ops.mega_moe_grad(
                 dispatch,
                 dispatch_target_off * spec.hidden_size,
@@ -316,7 +330,8 @@ class _MegaMoeFunction(  # pylint: disable=abstract-method,arguments-differ
                 spec.hidden_size,
                 spec.local_num_tokens,
             )
-            return grad_x.clone(), grad_weight1, grad_weight2, None, None, None
+            grad_input = _restore_input_gradient(ctx, grad_x, permutation_inputs)
+            return grad_input, grad_weight1, grad_weight2, None, None, None, None
         finally:
             workspace.release()
 
@@ -343,4 +358,39 @@ def execute_mega_moe(
     Returns:
         Expert-major output rows with independent storage.
     """
-    return _MegaMoeFunction.apply(routed_tokens, weight1, weight2, route, plan, workspace)
+    return _MegaMoeFunction.apply(routed_tokens, weight1, weight2, route, plan, workspace, None)
+
+
+def execute_mega_moe_with_permutation(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    weight1: torch.Tensor,
+    weight2: torch.Tensor,
+    route: PreparedTopKRoute,
+    plan: MegaMoePlan,
+    workspace: MegaMoeWorkspace,
+) -> torch.Tensor:
+    """Include input permutation backward within the workspace lease.
+
+    Args:
+        hidden_states: Original flattened token rows.
+        topk_ids: Expert IDs used to prepare the routed rows.
+        weight1: Local gate and up-projection weights.
+        weight2: Local down-projection weights.
+        route: Rows and metadata prepared without recording autograd operations.
+        plan: Shape-specific native descriptors.
+        workspace: Reusable communication buffers.
+
+    Returns:
+        Owned expert-major output rows, differentiable with respect to the
+        original token rows and local expert weights.
+    """
+    return _MegaMoeFunction.apply(
+        hidden_states,
+        weight1,
+        weight2,
+        route.metadata,
+        plan,
+        workspace,
+        (route.routed_tokens, topk_ids, route.unpermute_mapping),
+    )

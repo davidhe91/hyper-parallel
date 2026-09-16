@@ -92,7 +92,13 @@ output = experts(
 ### 容量
 
 `expert_capacity_factor=None` 是默认值，接收容量为 `EP * T * K` 向上对齐到 128，保证 lossless。
-SHMEM workspace 和每个待反向 forward 保存的 dispatch clone、up-projection、activation 均受该容量影响。
+该容量用于各 rank 对称分配的 SHMEM 接收区。计算中间张量和待反向保存的 dispatch、
+up-projection、activation 按本 rank 本次实际接收量分配；无接收时保留一行 ABI 占位。
+源端 permute/combine 输出仍为 `T * K` 行。每次 forward 保存独立的接收数据和容量，支持后续路由变化。
+
+分配前将已交换的各 rank 负载一次读取到 Host，同时用于本地定尺寸和全局溢出检查。
+这也适用于默认 lossless 模式，会增加一次 Device-to-Host 等待，以减少计算和保存区的容量余量。
+SHMEM heap 的预留仍由配置接收容量决定，不会随本次实际接收量缩小。
 
 显式设置不小于 1 的有限 factor 时，容量改为 `ceil(T * K * factor)` 再对齐。
 超过容量时，所有 EP rank 在进入 native kernel 前报 `capacity overflow`。

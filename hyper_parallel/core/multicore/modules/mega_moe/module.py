@@ -21,16 +21,15 @@ from typing import Any
 
 import torch
 
-from hyper_parallel.core.multicore.scheduler.config import MAX_EXPERT_NUM_PER_RANK
 from hyper_parallel.core.multicore import shmem
+from hyper_parallel.core.multicore.scheduler.config import MAX_EXPERT_NUM_PER_RANK
 
 from ..module import MulticoreModule
-from .function import execute_mega_moe
+from .function import execute_mega_moe_with_permutation
 from .plan import build_mega_moe_plan
 from .route import prepare_topk_route, restore_topk_output
 from .spec import _COMMUNICATION_SPLIT, bind_mega_moe_spec
 from .workspace import MegaMoeWorkspace, configure_symmetric_heap
-
 
 __all__ = ["MegaMoeExperts"]
 
@@ -337,18 +336,23 @@ class MegaMoeExperts(MulticoreModule):
             tokens_per_expert,
         )
         resources = self._get_execution_resources(hidden_flat)
-        route = prepare_topk_route(
+        # The expert autograd bridge consumes permutation gradients before the
+        # workspace can be reused, so route preparation needs no separate node.
+        with torch.no_grad():
+            route = prepare_topk_route(
+                hidden_flat,
+                topk_ids,
+                topk_weights,
+                resources.spec,
+                tokens_per_expert,
+                workspace=resources.workspace,
+            )
+        expert_output = execute_mega_moe_with_permutation(
             hidden_flat,
             topk_ids,
-            topk_weights,
-            resources.spec,
-            tokens_per_expert,
-        )
-        expert_output = execute_mega_moe(
-            route.routed_tokens,
             self.gate_up_weight,
             self.down_weight,
-            route.metadata,
+            route,
             resources.plan,
             resources.workspace,
         )

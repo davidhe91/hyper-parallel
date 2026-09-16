@@ -23,21 +23,36 @@ import ctypes
 from dataclasses import dataclass
 from enum import IntEnum
 
-
 # ── Constants (match runtime_head.hpp exactly) ────────────────────────────────
 MAX_TENSOR_DIMS      = 4
 MAX_INPUTS_PER_TASK  = 4
 MAX_OUTPUTS_PER_TASK = 4
 
-MAX_TASK_NUM         = 256 * 100
-MAX_EVENT_NUM        = 1024
+MIN_EVENT_CAPACITY  = 1024
 NUM_WORKERS_VECTOR   = 48
 NUM_WORKERS_CUBE     = 24
-QUEUE_CAPACITY       = 100
-TASK_TYPE_INDEX_NUM  = 256 * 100
 MAX_GROUP_LIST       = 512
 MAX_EXPERT_NUM_PER_RANK = 16
 ATOMIC_ADD_VALUE_LEN = 8
+READY_CACHE_LINE_BYTES = 64
+
+
+def mega_moe_event_capacity(num_experts: int, ep_size: int) -> int:
+    """Reserve graph events and the complete atomic write at the last trigger.
+
+    Args:
+        num_experts: Global expert count.
+        ep_size: Expert-parallel group size.
+
+    Returns:
+        Cache-line-aligned event slots, with a minimum of 1024.
+    """
+    if ep_size <= 0 or num_experts <= 0 or num_experts % ep_size:
+        raise ValueError("num_experts must be positive and divisible by ep_size")
+    # Ready follows termination; both triggers write a complete atomic vector.
+    final_event = num_experts + 3 * (num_experts // ep_size) + (4 if ep_size > 1 else 2)
+    required = final_event + ATOMIC_ADD_VALUE_LEN
+    return max(MIN_EVENT_CAPACITY, (required + 15) // 16 * 16)
 
 
 # ── Enums ─────────────────────────────────────────────────────────────────────
@@ -133,21 +148,15 @@ class DynamicDataC(ctypes.Structure):
 
 
 class RuntimeConfigC(ctypes.Structure):
+    """Common 64-byte header; allocated subclasses append graph-sized arrays."""
+
     _fields_ = [
-        ("task_num",                  ctypes.c_uint32),
-        ("num_workers",               ctypes.c_uint32),
-        ("queue_capacity",            ctypes.c_uint32),
-        ("config_extra_value",        ctypes.c_uint32),
-        ("all_event_num_triggers",    ctypes.c_int32   * MAX_EVENT_NUM),
-        ("all_tasks",                 TaskDescC         * MAX_TASK_NUM),
-        ("all_events",                EventDescC        * MAX_EVENT_NUM),
-        ("task_index_num",            ctypes.c_int32   * 4),
-        ("cube_task_indices",         ctypes.c_int32   * TASK_TYPE_INDEX_NUM),
-        ("vector_task_indices",       ctypes.c_int32   * TASK_TYPE_INDEX_NUM),
-        ("mix_task_indices",          ctypes.c_int32   * TASK_TYPE_INDEX_NUM),
-        ("dynamic_data",              DynamicDataC),
-        ("grouped_matmul_group_list", ctypes.c_int64   * MAX_GROUP_LIST),
-        ("atomic_add_values",         ctypes.c_int32   * ATOMIC_ADD_VALUE_LEN),
+        ("task_num", ctypes.c_uint32),
+        ("num_workers", ctypes.c_uint32),
+        ("task_capacity", ctypes.c_uint32),
+        ("event_capacity", ctypes.c_uint32),
+        ("ready_event", ctypes.c_uint32),
+        ("_padding", ctypes.c_uint32 * 11),
     ]
 
 
@@ -353,8 +362,21 @@ def validate_runtime_config(
         raise ValueError(
             f"num_workers ({cfg.num_workers}) must equal twice num_cube_cores ({num_cube_cores})."
         )
-    if cfg.task_num > MAX_TASK_NUM:
-        raise ValueError(f"task_num ({cfg.task_num}) exceeds MAX_TASK_NUM ({MAX_TASK_NUM}).")
+    if cfg.task_num > len(cfg.all_tasks):
+        raise ValueError(f"task_num ({cfg.task_num}) exceeds allocated task capacity ({len(cfg.all_tasks)}).")
+    event_capacity = len(cfg.all_event_num_triggers)
+    queues = (cfg.cube_task_indices, cfg.vector_task_indices, cfg.mix_task_indices)
+    for indices, count in zip(queues, cfg.task_index_num[:3]):
+        if count < 0 or count > len(indices):
+            raise ValueError(f"invalid runtime task-index count {count}")
+        for task_id in indices[:count]:
+            if task_id < 0 or task_id >= len(cfg.all_tasks):
+                raise ValueError(f"invalid runtime task id {task_id}")
+            task = cfg.all_tasks[task_id]
+            if (task.dependent_event != 0xFFFFFFFF and task.dependent_event >= event_capacity) or (
+                task.trigger_event + ATOMIC_ADD_VALUE_LEN > event_capacity
+            ):
+                raise ValueError(f"task {task_id} references an event outside allocated capacity {event_capacity}")
 
     local_experts = tsv.single_rank_expert_num
     group_size = cfg.dynamic_data.dynamic_group_size
@@ -381,3 +403,35 @@ def validate_runtime_config(
             _validate_gmm_task(task, descriptor_index, num_cube_cores * local_experts)
         else:
             _validate_shmem_task(task, descriptor_index, tsv)
+
+
+def configure_ready_handshake(cfg: RuntimeConfigC, tsv: TaskSplitValue) -> None:
+    """Reserve a local ready event after the graph's ordinary dependencies.
+
+    Args:
+        cfg: Allocated graph configuration whose counters include ready padding.
+        tsv: Topology that determines whether peer readiness is needed.
+    """
+    if tsv.ep == 1:
+        return
+    ready_event = tsv.all_event_num + 3
+    if ready_event + ATOMIC_ADD_VALUE_LEN > cfg.event_capacity:
+        raise ValueError("ready handshake event exceeds event_capacity.")
+    cfg.ready_event = ready_event
+    cfg.all_event_num_triggers[ready_event] = 1
+
+
+def event_workspace_bytes(ep_size: int, num_experts: int) -> int:
+    """Return graph counters plus persistent per-rank ready generations.
+
+    Args:
+        ep_size: Number of expert-parallel ranks sharing the symmetric arena.
+        num_experts: Global expert count used to size ordinary event counters.
+
+    Returns:
+        Required byte count for one direction's event workspace.
+    """
+    counter_bytes = mega_moe_event_capacity(num_experts, ep_size) * ctypes.sizeof(ctypes.c_int32)
+    if ep_size <= 1:
+        return counter_bytes
+    return counter_bytes + (ep_size + 1) * READY_CACHE_LINE_BYTES

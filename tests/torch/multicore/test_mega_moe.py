@@ -24,13 +24,13 @@ from pathlib import Path
 import pytest
 
 from tests.common.mark_utils import arg_mark
+from tests.common.parallel_case import TorchCase, parallel_run
+from tests.common.port_utils import allocate_port
 from tests.torch.multicore._test_env import (
     multicore_adapter_is_available,
     prepare_multicore_test_environment,
     without_inherited_rank_environment,
 )
-from tests.common.parallel_case import TorchCase, parallel_run
-from tests.common.port_utils import allocate_port
 
 _WORKER = str(Path(__file__).resolve().parent / "_test_mega_moe.py")
 _PRECISION_WORLD_SIZE = 2
@@ -148,17 +148,21 @@ def test_mega_moe_representative_performance(monkeypatch, tmp_path: Path) -> Non
     )
 
 
-def _run_acceptance_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str, cards: int) -> dict:
+def _run_acceptance_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str, cards: int, worker: str | None = None,
+    heap_bytes: int = 64 * 1024 * 1024,
+) -> dict:
     """Launch one real-device acceptance worker and require its rank evidence."""
     _prepare_torch_multicore_test_environment()
     result_dir = Path(os.getenv("HP_MEGA_MOE_EVIDENCE_DIR", str(tmp_path)))
     result_path = result_dir / f"{case}.json"
-    worker = "_test_mega_moe_resources.py" if cards == 2 else "_test_mega_moe_defaults.py"
+    if worker is None:
+        worker = "_test_mega_moe_resources.py" if cards == 2 else "_test_mega_moe_defaults.py"
     monkeypatch.setenv("HP_MEGA_MOE_WORLD_SIZE", str(cards))
     monkeypatch.setenv("HP_MEGA_MOE_LEVEL1_RESULT", str(result_path))
     monkeypatch.setenv("HYPER_PARALLEL_SHMEM_BOOTSTRAP_ENDPOINT", f"tcp://127.0.0.1:{allocate_port()}")
     if cards == 2:
-        monkeypatch.setenv("HYPER_PARALLEL_SHMEM_HEAP_SIZE", str(64 * 1024 * 1024))
+        monkeypatch.setenv("HYPER_PARALLEL_SHMEM_HEAP_SIZE", str(heap_bytes))
     else:
         monkeypatch.delenv("HYPER_PARALLEL_SHMEM_HEAP_SIZE", raising=False)
     with without_inherited_rank_environment():
@@ -169,6 +173,45 @@ def _run_acceptance_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case
     result = json.loads(result_path.read_text(encoding="utf-8"))
     assert len(result["ranks"]) == cards, f"expected {cards} rank records, got {len(result['ranks'])}."
     return result
+
+
+@arg_mark(
+    plat_marks=["platform_ascend910b"],
+    level_mark="level1",
+    card_mark="allcards",
+    essential_mark="unessential",
+)
+def test_mega_moe_local_capacity_lifetime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Preserve all gradients across odd receive tails and two outstanding routes."""
+    _run_acceptance_worker(
+        monkeypatch, tmp_path, "test_mega_moe_local_capacity_lifetime", 2, "_test_mega_moe_memory.py",
+    )
+
+
+@arg_mark(
+    plat_marks=["platform_ascend910b"],
+    level_mark="level1",
+    card_mark="allcards",
+    essential_mark="unessential",
+)
+def test_mega_moe_poisoned_buffers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Require complete writes after NaN and stale-value poisoning across route changes."""
+    _run_acceptance_worker(
+        monkeypatch, tmp_path, "test_mega_moe_poisoned_buffers", 2, "_test_mega_moe_zeroing.py",
+    )
+
+
+@arg_mark(
+    plat_marks=["platform_ascend910b"],
+    level_mark="level1",
+    card_mark="allcards",
+    essential_mark="unessential",
+)
+def test_mega_moe_device_ready_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Validate peer readiness under checkpoint replay, rank skew and stream reuse."""
+    _run_acceptance_worker(
+        monkeypatch, tmp_path, "test_mega_moe_device_ready_lifecycle", 2, "_test_mega_moe_ready.py",
+    )
 
 
 @arg_mark(
@@ -204,3 +247,35 @@ def test_mega_moe_default_interface(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     Expectation: Outputs and gradients agree; stable latency, peak memory and software identity are recorded.
     """
     _run_acceptance_worker(monkeypatch, tmp_path, "test_mega_moe_default_capacity_acceptance", 4)
+
+
+@arg_mark(
+    plat_marks=["platform_ascend910b"],
+    level_mark="level1",
+    card_mark="allcards",
+    essential_mark="unessential",
+)
+def test_mega_moe_large_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Execute compute tasks beyond 25,600 and compare all gradients with common MoE."""
+    # This graph needs a larger symmetric heap than the small acceptance cases.
+    _run_acceptance_worker(
+        monkeypatch, tmp_path, "test_mega_moe_large_runtime", 2, "_test_mega_moe_runtime.py",
+        heap_bytes=2 * 1024**3,
+    )
+
+
+@arg_mark(
+    plat_marks=["platform_ascend910b"],
+    level_mark="level1",
+    card_mark="allcards",
+    essential_mark="unessential",
+)
+def test_mega_moe_group_list_isolation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Feature: Isolated grouped-matmul scratch for up to 16 experts per rank.
+
+    Description: Repeat balanced, empty-expert, skew and single-destination routes with 10 to 16 local experts.
+    Expectation: Forward, all gradients and SGD updates match common MoE over eight steps per shape.
+    """
+    _run_acceptance_worker(
+        monkeypatch, tmp_path, "test_mega_moe_group_list_isolation", 2, "_test_mega_moe_runtime.py",
+    )

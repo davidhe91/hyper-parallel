@@ -20,8 +20,8 @@ from unittest.mock import Mock, PropertyMock, patch
 
 import torch
 
-from hyper_parallel.core.multicore.modules.mega_moe.module import MegaMoeExperts
 from hyper_parallel.core.multicore.modules.mega_moe import module as mega_moe_module
+from hyper_parallel.core.multicore.modules.mega_moe.module import MegaMoeExperts
 
 
 class TestMegaMoeExperts(unittest.TestCase):
@@ -121,7 +121,7 @@ class TestMegaMoeExperts(unittest.TestCase):
                 mega_moe_module, "prepare_topk_route", return_value=route
             ) as mock_prepare,
             patch.object(
-                mega_moe_module, "execute_mega_moe", return_value=expert_output
+                mega_moe_module, "execute_mega_moe_with_permutation", return_value=expert_output
             ) as mock_execute,
             patch.object(
                 mega_moe_module, "restore_topk_output", return_value=expected
@@ -138,13 +138,15 @@ class TestMegaMoeExperts(unittest.TestCase):
         hidden_flat = mock_prepare.call_args.args[0]
         torch.testing.assert_close(hidden_flat, hidden_states.reshape(128, 16))
         mock_prepare.assert_called_once_with(
-            hidden_flat, topk_ids, topk_weights, resources.spec, tokens_per_expert
+            hidden_flat, topk_ids, topk_weights, resources.spec, tokens_per_expert,
+            workspace=resources.workspace,
         )
         mock_execute.assert_called_once_with(
-            route.routed_tokens,
+            hidden_flat,
+            topk_ids,
             experts.gate_up_weight,
             experts.down_weight,
-            route.metadata,
+            route,
             resources.plan,
             resources.workspace,
         )

@@ -19,9 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import torch
-
 import numpy as np
+import torch
 
 from hyper_parallel.core.multicore.modules.mega_moe.backward.gen_runtime_data import (
     build_config_for_rank as build_backward_config,
@@ -48,9 +47,9 @@ from hyper_parallel.core.multicore.modules.mega_moe.forward.tiling_tables import
     get_up_proj_tiling_bytes,
 )
 from hyper_parallel.core.multicore.scheduler.config import TaskSplitValue
+from hyper_parallel.core.multicore.scheduler.runtime import serialize_runtime_config
 
 from .spec import MegaMoeSpec
-
 
 
 @dataclass(frozen=True)
@@ -104,7 +103,7 @@ def _build_task_values(spec: MegaMoeSpec) -> TaskSplitValue:
 
 
 def build_mega_moe_plan(spec: MegaMoeSpec, device: Any) -> MegaMoePlan:
-    """Build the current legacy forward/backward ABI without fusion slots.
+    """Build trimmed dense forward/backward runtime images without fusion slots.
 
     Args:
         spec: Validated local-token and expert topology specification.
@@ -164,7 +163,7 @@ def build_mega_moe_plan(spec: MegaMoeSpec, device: Any) -> MegaMoePlan:
     swiglu_grad = backward_graph.get_op("swiglu_grad")
     return MegaMoePlan(
         spec=spec,
-        fwd_runtime_config=_tensor_from_bytes(bytes(forward_data), device),
+        fwd_runtime_config=_tensor_from_bytes(serialize_runtime_config(forward_data), device),
         up_proj_tiling=_tensor_from_bytes(
             get_up_proj_tiling_bytes(up_proj.split_value, **gmm_options), device
         ),
@@ -181,7 +180,7 @@ def build_mega_moe_plan(spec: MegaMoeSpec, device: Any) -> MegaMoePlan:
         down_proj_tiling=_tensor_from_bytes(
             get_down_proj_tiling_bytes(down_proj.split_value, **gmm_options), device
         ),
-        bwd_runtime_config=_tensor_from_bytes(bytes(backward_data), device),
+        bwd_runtime_config=_tensor_from_bytes(serialize_runtime_config(backward_data), device),
         act_grad_tiling=_tensor_from_bytes(
             get_act_grad_tiling_bytes(act_grad.split_value, **gmm_options), device
         ),

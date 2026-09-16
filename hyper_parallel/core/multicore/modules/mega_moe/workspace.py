@@ -25,13 +25,19 @@ from typing import Any
 import torch
 
 from hyper_parallel.core.multicore import shmem
+from hyper_parallel.core.multicore.scheduler.config import (
+    MIN_EVENT_CAPACITY,
+    event_workspace_bytes,
+    mega_moe_event_capacity,
+)
 
 from .spec import MegaMoeSpec, _resolve_receive_capacity
 
-
-_GMM_WORKSPACE_BYTES = 32 * 1024 * 1024
-_SWIGLU_GRAD_WORKSPACE_BYTES = 16 * 1024 * 1024
-_EVENT_COUNTER_BYTES = 4096
+# The composed Cube-only GMM and SwiGLU-grad kernels do not use these legacy
+# tensor arguments. Keep non-empty ABI placeholders; native tiling reserves
+# the separate CANN library workspace needed by the enclosing operator.
+_GMM_WORKSPACE_BYTES = 512
+_SWIGLU_GRAD_WORKSPACE_BYTES = 512
 _WORKSPACE_ALIGNMENT = 512
 _HEAP_GRANULARITY_BYTES = 64 * 1024 * 1024
 
@@ -53,7 +59,8 @@ def _spec_workspace_bytes(specification: Mapping[str, Any], element_size: int) -
     tensor_bytes = (
         (capacity + routed_slots) * specification["hidden_size"] * element_size
     )
-    return tensor_bytes + 2 * _EVENT_COUNTER_BYTES + 4 * (_WORKSPACE_ALIGNMENT - 1)
+    event_bytes = event_workspace_bytes(specification["ep_size"], specification["num_experts"])
+    return tensor_bytes + 2 * event_bytes + 4 * (_WORKSPACE_ALIGNMENT - 1)
 
 
 def configure_symmetric_heap(
@@ -119,6 +126,9 @@ class MegaMoeWorkspace:
     completion_event: Any | None = None
     in_use: bool = False
     used: bool = False
+    event_counter_bytes: int = MIN_EVENT_CAPACITY * 4
+    forward_ready_initialized: bool = False
+    backward_ready_initialized: bool = False
     lock: Any = field(default_factory=threading.Lock, repr=False)
 
     def ensure(self, spec: MegaMoeSpec, dtype: Any, device: Any) -> None:
@@ -147,6 +157,8 @@ class MegaMoeWorkspace:
         self.device = device
         self.expert_capacity = requested_capacity
         self.routed_slots = spec.routed_slots
+        self.event_counter_bytes = mega_moe_event_capacity(spec.num_experts, spec.ep_size) * 4
+        event_bytes = event_workspace_bytes(spec.ep_size, spec.num_experts)
         try:
             self.expert_buffer = shmem.empty(
                 (requested_capacity, spec.hidden_size),
@@ -159,12 +171,12 @@ class MegaMoeWorkspace:
                 alignment=_WORKSPACE_ALIGNMENT,
             )
             self.forward_event_counters = shmem.empty(
-                (_EVENT_COUNTER_BYTES,),
+                (event_bytes,),
                 dtype=torch.uint8,
                 alignment=_WORKSPACE_ALIGNMENT,
             )
             self.backward_event_counters = shmem.empty(
-                (_EVENT_COUNTER_BYTES,),
+                (event_bytes,),
                 dtype=torch.uint8,
                 alignment=_WORKSPACE_ALIGNMENT,
             )
@@ -183,6 +195,37 @@ class MegaMoeWorkspace:
             self._free_symmetric_tensors()
             self._free_local_tensors()
             raise
+
+    def prepare_event_counters(self, *, forward: bool) -> Any:
+        """Reset per-call counters while preserving the ready generation."""
+        if forward:
+            field_name = "forward_event_counters"
+            events = self.forward_event_counters
+            ready_initialized = self.forward_ready_initialized
+        else:
+            field_name = "backward_event_counters"
+            events = self.backward_event_counters
+            ready_initialized = self.backward_ready_initialized
+        if events is None:
+            raise RuntimeError(f"MegaMoe workspace {field_name} is not initialized.")
+        events[:self.event_counter_bytes].zero_()
+        if events.numel() == self.event_counter_bytes or ready_initialized:
+            return events
+
+        # Initialize the persistent generation before any peer can signal it.
+        events[self.event_counter_bytes:].zero_()
+        shmem.host_barrier()
+        if forward:
+            self.forward_ready_initialized = True
+        else:
+            self.backward_ready_initialized = True
+        return events
+
+    def wait_for_reuse(self) -> None:
+        """Order count exchange after the previous workspace lease."""
+        with self.lock:
+            if self.used:
+                torch.npu.current_stream(self.device).wait_event(self.completion_event)
 
     def claim(self) -> None:
         """Claim the serial workspace and order it after the previous stream."""
@@ -221,6 +264,8 @@ class MegaMoeWorkspace:
             setattr(self, field_name, None)
         self.expert_capacity = 0
         self.routed_slots = 0
+        self.forward_ready_initialized = False
+        self.backward_ready_initialized = False
 
     def _free_local_tensors(self) -> None:
         """Release local-only workspaces after all queued kernels complete."""

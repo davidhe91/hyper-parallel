@@ -38,18 +38,24 @@ class KernelWorkerBase {
     this->worker_id_ = worker_id;
     this->runtimeConfigPtr = runtimeConfigPtr;
 
-    all_event_counters.SetGlobalBuffer((__gm__ int32_t *)(input_list[Derived::EVENT_IDX]), MAX_EVENT_NUM);
+    uint64_t runtime_bytes = getExtraValueFromTiling(input_list[Derived::TILING_IDX], 6);
+    uint64_t event_bytes = getExtraValueFromTiling(input_list[Derived::TILING_IDX], 7);
+    uint32_t ep_size = static_cast<uint32_t>(getExtraValueFromTiling(input_list[Derived::TILING_IDX], 1));
+    if (!isRuntimeStorageValid(runtimeConfigPtr, runtime_bytes, event_bytes, ep_size)) {
+      AscendC::Trap();
+    }
+    this->runtime_task_capacity = getRuntimeTaskCapacity(runtimeConfigPtr);
+    this->runtime_event_capacity = getRuntimeEventCapacity(runtimeConfigPtr);
+    all_event_counters.SetGlobalBuffer((__gm__ int32_t *)(input_list[Derived::EVENT_IDX]), runtime_event_capacity);
 
-    all_event_num_triggers.SetGlobalBuffer((__gm__ int32_t *)(this->runtimeConfigPtr + getAllEventNumTriggersOffset()),
-                                           MAX_EVENT_NUM);
-
-    vector_task_indexs.SetGlobalBuffer((__gm__ int32_t *)(this->runtimeConfigPtr + getVectorTaskIndexsOffset()),
-                                       TASK_TYPE_INDEX_NUM);
-
-    cube_task_indexs.SetGlobalBuffer((__gm__ int32_t *)(this->runtimeConfigPtr + getCubeTaskIndexsOffset()),
-                                     TASK_TYPE_INDEX_NUM);
-
-    atomic_add_values.SetGlobalBuffer((__gm__ int32_t *)(this->runtimeConfigPtr + getAtomicAddValuesOffset()), 8);
+    all_event_num_triggers.SetGlobalBuffer(
+        (__gm__ int32_t *)(runtimeConfigPtr + getAllEventNumTriggersOffset()), runtime_event_capacity);
+    vector_task_indexs.SetGlobalBuffer(
+        (__gm__ int32_t *)(runtimeConfigPtr + getVectorTaskIndexsOffset(runtimeConfigPtr)), runtime_task_capacity);
+    cube_task_indexs.SetGlobalBuffer(
+        (__gm__ int32_t *)(runtimeConfigPtr + getCubeTaskIndexsOffset(runtimeConfigPtr)), runtime_task_capacity);
+    atomic_add_values.SetGlobalBuffer(
+        (__gm__ int32_t *)(runtimeConfigPtr + getAtomicAddValuesOffset(runtimeConfigPtr)), ATOMIC_ADD_VALUE_LEN);
 
     this->input_list = input_list;
     this->task_num = getTaskNum(this->runtimeConfigPtr);
@@ -60,6 +66,15 @@ class KernelWorkerBase {
   }
 
   __aicore__ inline void Process() {
+    ReadyHandshakeMeta meta;
+    if (LoadReadyHandshakeMeta(&meta)) {
+      WaitForDeviceReady(meta);
+    }
+    ProcessStatic();
+  }
+
+ protected:
+  __aicore__ inline void ProcessStatic() {
 #ifdef __DAV_C220_CUBE__
     uint32_t block_idx = this->worker_id_;
     do {
@@ -87,7 +102,55 @@ class KernelWorkerBase {
 #endif
   }
 
- protected:
+  __aicore__ inline bool LoadReadyHandshakeMeta(ReadyHandshakeMeta *meta) {
+    getReadyHandshakeMeta(this->runtimeConfigPtr, meta);
+    return meta->ready_event != 0;
+  }
+
+  __aicore__ inline void PublishDeviceReady(const ReadyHandshakeMeta &meta) {
+#ifndef __DAV_C220_CUBE__
+    int64_t ep = getExtraValueFromTiling(input_list[Derived::TILING_IDX], 1);
+    int64_t rank = getExtraValueFromTiling(input_list[Derived::TILING_IDX], 0) % ep;
+    constexpr uint32_t ready_stride = DATA_CACHE_LINE_SIZE / INT32_T_SIZE;
+    __gm__ int32_t *ready =
+      (__gm__ int32_t *)(input_list[Derived::EVENT_IDX]) + runtime_event_capacity;
+
+    GlobalTensor<int32_t> ready_state;
+    ready_state.SetGlobalBuffer(ready, static_cast<uint32_t>((ep + 1) * ready_stride));
+    uint32_t generation_index = static_cast<uint32_t>(ep) * ready_stride;
+    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
+      ready_state[generation_index]);
+    int32_t generation = ready_state.GetValue(generation_index) + 1;
+    ready_state.SetValue(generation_index, generation);
+    DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
+      ready_state[generation_index]);
+    PipeBarrier<PIPE_ALL>();
+
+    uint32_t round = 0;
+    for (int64_t distance = 1; distance < ep; distance *= 2, ++round) {
+      int64_t target = (rank + distance) % ep;
+      __gm__ int32_t *round_ready = ready + round * ready_stride;
+      aclshmemx_signal_op(round_ready, generation, ACLSHMEM_SIGNAL_SET, static_cast<int>(target));
+      aclshmem_signal_wait_until(round_ready, ACLSHMEM_CMP_GE, generation);
+    }
+    TriggerEvent(meta.ready_event);
+#endif
+  }
+
+  __aicore__ inline void WaitForDeviceReady(const ReadyHandshakeMeta &meta) {
+#ifdef __DAV_C220_CUBE__
+    WaitForDependency(meta.ready_event);
+#else
+    if (this->worker_id_ % 2 == 0) {
+      return;
+    }
+    if (this->worker_id_ == 1) {
+      PublishDeviceReady(meta);
+    }
+    WaitForDependency(meta.ready_event);
+#endif
+  }
+
   __aicore__ inline TaskId GetTaskIndex(uint32_t task_id) {
 #ifdef __DAV_C220_CUBE__
     return cube_task_indexs.GetValue(task_id);
@@ -130,8 +193,15 @@ class KernelWorkerBase {
   }
 
   __aicore__ inline void ExecuteTask(TaskId task_id) {
+    if (task_id >= runtime_task_capacity) {
+      AscendC::Trap();
+    }
     TaskDesc task_desc;
     getTaskDesc(this->runtimeConfigPtr, &(task_desc), task_id);
+    if ((task_desc.dependent_event != EVENT_INVALID_ID && task_desc.dependent_event >= runtime_event_capacity) ||
+        static_cast<uint64_t>(task_desc.trigger_event) + ATOMIC_ADD_VALUE_LEN > runtime_event_capacity) {
+      AscendC::Trap();
+    }
     if (task_desc.dependent_event != EVENT_INVALID_ID) {
       WaitForDependency(task_desc.dependent_event);
     }
@@ -193,6 +263,8 @@ class KernelWorkerBase {
 
   uint32_t worker_id_ = 0;
   uint32_t task_num = 0;
+  uint32_t runtime_task_capacity = 0;
+  uint32_t runtime_event_capacity = 0;
   int32_t vector_task_num = 0;
   int32_t cube_task_num = 0;
 

@@ -158,7 +158,7 @@ class KernelWorker : public KernelWorkerBase<KernelWorker> {
         grouped_list_tensor.SetGlobalBuffer((__gm__ int64_t *)(grouped_list), expert_num_single_rank);
 
         GM_ADDR grouped_list_real =
-          this->runtimeConfigPtr + getGroupedMatmulGroupListOffsetById(AscendC::GetBlockIdx());
+          this->runtimeConfigPtr + getGroupedMatmulGroupListOffsetById(this->runtimeConfigPtr, AscendC::GetBlockIdx());
         GlobalTensor<int64_t> grouped_list_tensor_real;
         grouped_list_tensor_real.SetGlobalBuffer((__gm__ int64_t *)(grouped_list_real), expert_num_single_rank);
         uint32_t data_index = task_desc.task_index / this->core_num;
