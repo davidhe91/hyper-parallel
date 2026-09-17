@@ -19,9 +19,15 @@ import os
 from tests.common.distributed_launcher import torchrun_case
 from tests.common.mark_utils import arg_mark
 from tests.common.port_utils import allocate_port
+from tests.torch.multicore._test_env import prepare_multicore_test_environment
 
 
 _WORKER = os.path.join(os.path.dirname(__file__), "_test_all_gather.py")
+
+
+def _run(case_name: str, num_proc: int) -> None:
+    prepare_multicore_test_environment()
+    torchrun_case(_WORKER, case_name, num_proc=num_proc)
 
 
 def _set_unique_bootstrap_endpoint(monkeypatch) -> None:
@@ -30,7 +36,7 @@ def _set_unique_bootstrap_endpoint(monkeypatch) -> None:
 
 def _run_boundary_matrix(monkeypatch, rank_count: int) -> None:
     _set_unique_bootstrap_endpoint(monkeypatch)
-    torchrun_case(_WORKER, "test_all_gather_boundary_matrix", num_proc=rank_count)
+    _run("test_all_gather_boundary_matrix", num_proc=rank_count)
 
 
 @arg_mark(
@@ -86,7 +92,7 @@ def test_all_gather_boundary_matrix_8_ranks(monkeypatch) -> None:
 def test_all_gather_correctness_large(monkeypatch) -> None:
     """Run the large-message path with four Root PEs."""
     _set_unique_bootstrap_endpoint(monkeypatch)
-    torchrun_case(_WORKER, "test_all_gather_correctness_large", num_proc=4)
+    _run("test_all_gather_correctness_large", num_proc=4)
 
 
 @arg_mark(
@@ -98,7 +104,7 @@ def test_all_gather_correctness_large(monkeypatch) -> None:
 def test_all_gather_stream_order_and_visibility(monkeypatch) -> None:
     """Run non-default Stream ordering and rank-skew validation."""
     _set_unique_bootstrap_endpoint(monkeypatch)
-    torchrun_case(_WORKER, "test_all_gather_stream_order_and_visibility", num_proc=4)
+    _run("test_all_gather_stream_order_and_visibility", num_proc=4)
 
 
 @arg_mark(
@@ -110,7 +116,7 @@ def test_all_gather_stream_order_and_visibility(monkeypatch) -> None:
 def test_all_gather_symmetric_view_preserves_guards(monkeypatch) -> None:
     """Run a nonzero-offset symmetric output view with adjacent Guard regions."""
     _set_unique_bootstrap_endpoint(monkeypatch)
-    torchrun_case(_WORKER, "test_all_gather_symmetric_view_preserves_guards", num_proc=2)
+    _run("test_all_gather_symmetric_view_preserves_guards", num_proc=2)
 
 
 @arg_mark(
@@ -122,4 +128,4 @@ def test_all_gather_symmetric_view_preserves_guards(monkeypatch) -> None:
 def test_runtime_device_guard_on_real_npu(monkeypatch) -> None:
     """Run the Runtime device-drift guard on a host with at least two NPUs."""
     _set_unique_bootstrap_endpoint(monkeypatch)
-    torchrun_case(_WORKER, "test_runtime_device_guard_on_real_npu", num_proc=1)
+    _run("test_runtime_device_guard_on_real_npu", num_proc=1)

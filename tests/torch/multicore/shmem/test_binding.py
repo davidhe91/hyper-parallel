@@ -19,6 +19,7 @@ import os
 from tests.common.distributed_launcher import torchrun_case
 from tests.common.mark_utils import arg_mark
 from tests.common.port_utils import allocate_port
+from tests.torch.multicore._test_env import prepare_multicore_test_environment
 
 
 _TEST_DIR = os.path.dirname(__file__)
@@ -29,6 +30,7 @@ _ALL_GATHER_WORKER = os.path.join(_TEST_DIR, "_test_all_gather.py")
 
 
 def _run(worker: str, case_name: str, num_proc: int = 1) -> None:
+    prepare_multicore_test_environment()
     torchrun_case(worker, case_name, num_proc=num_proc)
 
 
