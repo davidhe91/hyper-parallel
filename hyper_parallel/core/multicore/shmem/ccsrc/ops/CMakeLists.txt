@@ -17,6 +17,7 @@ project(hyper_parallel_shmem_ops)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(${CMAKE_CURRENT_LIST_DIR}/../../../cmake/hardening.cmake)
 
 # Generate position-independent code.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -114,6 +115,7 @@ target_include_directories(all_gather_host PRIVATE
     ${SHMEM_HOME_PATH}/shmem/include
     ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
+hp_enable_compile_hardening(all_gather_host)
 
 # Fat kernel library: device objects + host launcher, linked against the
 # private SHMEM SDK libraries staged by the sdk phase.
@@ -123,11 +125,7 @@ add_library(hyper_parallel_shmem_ops SHARED
 )
 target_link_options(hyper_parallel_shmem_ops PRIVATE --cce-fatobj-link)
 target_link_libraries(hyper_parallel_shmem_ops PRIVATE hyper_parallel_shmem)
-set_target_properties(hyper_parallel_shmem_ops PROPERTIES
-    BUILD_WITH_INSTALL_RPATH TRUE
-    BUILD_RPATH "$ORIGIN:$ORIGIN/shmem"
-    INSTALL_RPATH "$ORIGIN:$ORIGIN/shmem"
-)
+hp_enable_link_hardening(hyper_parallel_shmem_ops)
 
 install(TARGETS hyper_parallel_shmem_ops LIBRARY DESTINATION lib)
 # Stage the private SHMEM SDK libraries next to the kernel library so the

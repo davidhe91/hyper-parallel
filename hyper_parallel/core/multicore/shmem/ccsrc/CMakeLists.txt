@@ -17,6 +17,7 @@ project(hyper_parallel_shmem_torch LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/hardening.cmake)
 
 # Generate position-independent code.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -132,6 +133,7 @@ target_include_directories(hyper_parallel_shmem_runtime PRIVATE
     ${ASCEND_HOME_PATH}/include
     ${SHMEM_HOME_PATH}/shmem/include
 )
+hp_enable_compile_hardening(hyper_parallel_shmem_runtime)
 
 # pybind11 Torch binding module, imported by name from Python.
 add_library(hyper_parallel_shmem_torch MODULE
@@ -157,11 +159,6 @@ target_link_libraries(hyper_parallel_shmem_torch PRIVATE
     "${SHMEM_HOME_PATH}/shmem/lib/libhyper_parallel_shmem.so"
     "${SHMEM_OPS_LIB}"
 )
-target_link_options(hyper_parallel_shmem_torch PRIVATE "-Wl,--enable-new-dtags")
-# Installed under lib/framework/torch: kernel library at ../.., SHMEM SDK
-# libraries at ../../shmem.
-set_target_properties(hyper_parallel_shmem_torch PROPERTIES
-    INSTALL_RPATH "$ORIGIN:$ORIGIN/../..:$ORIGIN/../../shmem"
-)
+hp_enable_elf_hardening(hyper_parallel_shmem_torch)
 
 install(TARGETS hyper_parallel_shmem_torch LIBRARY DESTINATION .)

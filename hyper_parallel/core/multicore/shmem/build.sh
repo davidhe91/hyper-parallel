@@ -226,16 +226,10 @@ while IFS= read -r component_library; do
         fail "GENERIC_SHMEM_DT_NEEDED_FOUND" \
             "Component library depends on a generic SHMEM SONAME: ${component_library}." 11
     fi
-    while IFS= read -r runpath_entry; do
-        runpath_value=$(sed -n 's/.*\[\(.*\)\].*/\1/p' <<< "${runpath_entry}")
-        IFS=':' read -r -a search_paths <<< "${runpath_value}"
-        for search_path in "${search_paths[@]}"; do
-            if [[ "${search_path}" == /* ]]; then
-                fail "ABSOLUTE_RUNPATH_FOUND" \
-                    "Component library contains an absolute RPATH/RUNPATH: ${component_library}: ${search_path}." 11
-            fi
-        done
-    done < <(grep -E '(RPATH|RUNPATH)' <<< "${dynamic_section}" || true)
+    if grep -Eq '(RPATH|RUNPATH)' <<< "${dynamic_section}"; then
+        fail "RUNPATH_FOUND" \
+            "Component library must not contain RPATH/RUNPATH: ${component_library}." 11
+    fi
 done < <(find "${OPS_INSTALL_DIR}" -type f -name '*.so' -print)
 
 trap - ERR

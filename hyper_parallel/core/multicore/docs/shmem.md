@@ -128,5 +128,6 @@ SHMEM 没有独立对外开关。启用 `--multicore on` 会构建 Torch Multico
 `--multicore off` 不交付二者的 native payload。内部 `shmem/build.sh` 由组件入口调用，
 依次构建 AllGather kernel、Runtime 与 Torch binding。
 
-私有库位于 `core/multicore/shmem/lib`，使用专属 SONAME 和相对 RUNPATH，
-避免与框架自带的通用 SHMEM 库冲突。详见 [构建与使用](build.md)。
+私有库位于 `core/multicore/shmem/lib`，使用专属 SONAME，避免与框架自带的通用 SHMEM 库冲突。
+制品不携带 RPATH/RUNPATH，运行时搜索路径由 Multicore `set_env.bash` 统一配置。详见
+[构建与使用](build.md)。

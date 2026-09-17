@@ -533,9 +533,9 @@ Multicore 组件入口负责依赖准备、私有 SHMEM、分 SoC vendor、vendo
 [HyperParallel 安装指南](../../../../docs/installation.md)。
 
 每个 SoC 的 CANN 构建同时生成 `HyperMegaMoe` 和 `HyperMegaMoeGrad`。组件会校验新构建及缓存 vendor，
-并在合并后再次校验四个 `aclnnHyperMegaMoe*` API、kernel object/metadata、SONAME、相对 RUNPATH 和运行时依赖。
-私有 SHMEM 库会校验专属 SONAME 和相对 RUNPATH；Torch adapter 还会校验 host ELF 架构、组件相对 RUNPATH
-和依赖边界。
+并在合并后再次校验四个 `aclnnHyperMegaMoe*` API、kernel object/metadata、SONAME 和运行时依赖。
+私有 SHMEM 库会校验专属 SONAME；所有随包 host 共享库均校验 ELF 架构、安全链接属性、无
+RPATH/RUNPATH 和依赖边界。动态库搜索路径由 `set_env.bash` 在启动 Python 前统一配置。
 
 Torch adapter 是由 CMake 构建、通过 `torch.ops.load_library()` 加载的 dispatcher 共享库，不生成
 `PyInit_*` 入口，也不链接 `libpython` 或 `libtorch_python`。adapter 运行时按组件相对路径定位并绝对加载
