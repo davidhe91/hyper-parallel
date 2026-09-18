@@ -21,6 +21,7 @@ from hyper_parallel.core.multicore.profiler.profiling import (
     CUBE_SLOT_COUNT,
     INVALID_OWNER_ID,
     PROFILE_RECORD,
+    _CycleTraceConfig,
     _parse_cycle_buffer,
     _profile_buffer_bytes_for_capacities,
 )
@@ -79,16 +80,18 @@ def _profile_buffer(
 
 def _parse(buffer: bytes, *, detailed_task_names: bool = False) -> dict:
     return _parse_cycle_buffer(
-        buffer=buffer,
-        rank=3,
-        device_id=7,
-        cycle_frequency_mhz=50.0,
-        detailed_task_names=detailed_task_names,
-        kernel_name="MegaMoe",
-        owner_label="Expert",
-        stage_names={0x10002: "GMM1"},
-        soc_name="Ascend910B3",
-        task_stage_names={9: "GMM1"},
+        buffer,
+        _CycleTraceConfig(
+            rank=3,
+            device_id=7,
+            cycle_frequency_mhz=50.0,
+            detailed_task_names=detailed_task_names,
+            kernel_name="MegaMoe",
+            owner_label="Expert",
+            stage_names={0x10002: "GMM1"},
+            soc_name="Ascend910B3",
+            task_stage_names={9: "GMM1"},
+        ),
         aic_record_capacity=_AIC_CAPACITY,
         aiv_record_capacity=_AIV_CAPACITY,
     )
